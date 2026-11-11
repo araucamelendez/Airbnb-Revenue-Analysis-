@@ -1,0 +1,326 @@
+---
+title: "Exploring Airbnb Revenue in New York City"
+author: "Arauca Melendez"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Introduction
+
+Airbnb listings can perform differently depending on where they are located, how much they cost, and what they offer guests. For this project, I wanted to look at some of the factors that may be related to Airbnb revenue in New York City.
+
+My main question is:
+
+**What listing characteristics are associated with higher expected nightly revenue for Airbnb listings in NYC?**
+
+I will focus on location, price and occupancy, room type, and amenities. I will also look at whether the number of amenities is related to revenue. The goal is to identify patterns in the data and consider what they could mean for someone managing an Airbnb listing.
+
+## About the data
+
+The project uses the `nyc_airbnb_listings.csv` file provided for the assignment. The data contains information about Airbnb listings in New York City. The assignment defines revenue as:
+
+\[ \text{Revenue} = \text{Nightly Price} \times \text{Occupancy} \]
+
+For this analysis, revenue is an estimate of expected revenue per night. It is not annual income or profit. It also does not subtract expenses such as cleaning, maintenance, taxes, or platform fees.
+
+## Getting started
+
+```{r}
+#| label: setup
+#| include: false
+
+packages <- c("tidyverse", "janitor", "scales")
+
+to_install <- packages[!packages %in% rownames(installed.packages())]
+
+if (length(to_install) > 0) {
+  install.packages(to_install)
+}
+
+library(tidyverse)
+library(janitor)
+library(scales)
+
+theme_set(theme_minimal())
+```
+
+## Loading the data
+
+If the CSV file is already in the same folder as this Quarto document, the code below will read it. Otherwise, it will download the file from the course website.
+
+```{r}
+data_url <- "https://georgehagstrom.github.io/DATA608Fall2026/assignments/stories/data/nyc_airbnb_listings.csv"
+
+if (!file.exists("nyc_airbnb_listings.csv")) {
+  download.file(data_url, "nyc_airbnb_listings.csv", mode = "wb")
+}
+
+airbnb_raw <- read_csv("nyc_airbnb_listings.csv", show_col_types = FALSE)
+
+airbnb <- airbnb_raw |>
+  clean_names()
+
+# Take a first look at the data.
+glimpse(airbnb)
+```
+
+The `glimpse()` output shows the number of rows and columns, along with the variable names and data types. This is useful before starting the analysis because it helps me understand what information is available.
+
+## Preparing the data
+
+First, I check whether the main variables used in this project are present.
+
+```{r}
+names(airbnb)
+```
+
+The analysis uses price, occupancy, and revenue, along with listing information such as borough, room type, and number of amenities. The code below converts the main numeric variables and prepares a smaller dataset for the comparisons.
+
+```{r}
+# Convert the main numeric variables.
+numeric_variables <- intersect(
+  c("price", "occupancy", "revenue", "n_amenities"),
+  names(airbnb)
+)
+
+airbnb <- airbnb |>
+  mutate(
+    across(
+      all_of(numeric_variables),
+      ~ readr::parse_number(as.character(.x))
+    )
+  )
+
+# Check how occupancy is recorded.
+summary(airbnb$occupancy)
+```
+
+The assignment defines revenue as price multiplied by occupancy. I calculate it below so that the same definition is used throughout the report. If occupancy is recorded as a percentage, I convert it to a proportion first.
+
+```{r}
+if (max(airbnb$occupancy, na.rm = TRUE) > 1) {
+  airbnb <- airbnb |>
+    mutate(occupancy = occupancy / 100)
+}
+
+airbnb <- airbnb |>
+  mutate(revenue = price * occupancy)
+
+# Keep listings with a positive price and a valid occupancy value.
+airbnb_clean <- airbnb |>
+  filter(
+    !is.na(price),
+    price > 0,
+    !is.na(occupancy),
+    occupancy >= 0,
+    occupancy <= 1,
+    !is.na(revenue)
+  )
+
+cat("Listings in original data:", nrow(airbnb), "\n")
+cat("Listings used in analysis:", nrow(airbnb_clean), "\n")
+```
+
+Some listings may be removed because price or occupancy is missing or not usable. I use the cleaned dataset for the comparisons below.
+
+## A quick look at the data
+
+```{r}
+airbnb_clean |>
+  summarise(
+    number_of_listings = n(),
+    average_price = mean(price, na.rm = TRUE),
+    median_price = median(price, na.rm = TRUE),
+    average_occupancy = mean(occupancy, na.rm = TRUE),
+    median_revenue = median(revenue, na.rm = TRUE)
+  ) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "measure",
+    values_to = "value"
+  )
+```
+
+The mean is the average, while the median is the middle value after the listings are sorted. I included both for price because a small number of very expensive listings can pull the average upward.
+
+## 1. Does expected revenue differ by borough?
+
+I start by comparing listings across the five boroughs. I use median revenue because it is less affected by unusually high values than the mean.
+
+```{r}
+borough_summary <- airbnb_clean |>
+  filter(!is.na(borough)) |>
+  group_by(borough) |>
+  summarise(
+    listings = n(),
+    median_revenue = median(revenue, na.rm = TRUE),
+    median_price = median(price, na.rm = TRUE),
+    median_occupancy = median(occupancy, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(median_revenue))
+
+borough_summary
+```
+
+```{r}
+ggplot(
+  borough_summary,
+  aes(x = reorder(borough, median_revenue), y = median_revenue)
+) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title = "Median Expected Nightly Revenue by Borough",
+    x = "Borough",
+    y = "Median expected revenue"
+  )
+```
+
+**What I notice:** The chart shows how the typical expected nightly revenue compares across boroughs. The borough with the highest median is not automatically the best investment location. It is also important to consider listing prices, occupancy, and the cost of operating a property.
+
+## 2. How are price and occupancy related?
+
+A higher nightly price does not necessarily mean a listing earns more. If a listing is priced too high, it may have lower occupancy. This chart compares nightly price and occupancy for individual listings.
+
+```{r}
+ggplot(airbnb_clean, aes(x = price, y = occupancy)) +
+  geom_point(alpha = 0.25) +
+  scale_x_continuous(labels = dollar_format()) +
+  scale_y_continuous(labels = percent_format()) +
+  coord_cartesian(xlim = c(0, quantile(airbnb_clean$price, 0.95, na.rm = TRUE))) +
+  labs(
+    title = "Nightly Price and Occupancy",
+    x = "Nightly price",
+    y = "Occupancy"
+  )
+```
+
+**What I notice:** I look for whether occupancy tends to be higher or lower as price increases. The points may be spread out, which would suggest that price alone does not explain occupancy. This is a relationship in the data, not proof that changing a price will cause occupancy to change.
+
+## 3. Does room type make a difference?
+
+Guests can choose from different types of Airbnb listings. I compare median expected nightly revenue by room type.
+
+```{r}
+room_summary <- airbnb_clean |>
+  filter(!is.na(room_type)) |>
+  group_by(room_type) |>
+  summarise(
+    listings = n(),
+    median_revenue = median(revenue, na.rm = TRUE),
+    median_price = median(price, na.rm = TRUE),
+    median_occupancy = median(occupancy, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(median_revenue))
+
+room_summary
+```
+
+```{r}
+ggplot(
+  room_summary,
+  aes(x = reorder(room_type, median_revenue), y = median_revenue)
+) +
+  geom_col(fill = "thistle4") +
+  coord_flip() +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title = "Median Expected Nightly Revenue by Room Type",
+    x = "Room type",
+    y = "Median expected revenue"
+  )
+```
+
+**What I notice:** This comparison helps show whether entire homes, private rooms, or other room types tend to have higher expected nightly revenue. However, entire homes may also have higher operating costs, so revenue alone does not tell us which type is most profitable.
+
+## 4. Are listings with more amenities associated with higher revenue?
+
+Amenities may make a listing more attractive to guests. I compare the number of amenities with expected nightly revenue.
+
+```{r}
+if ("n_amenities" %in% names(airbnb_clean)) {
+
+  amenity_summary <- airbnb_clean |>
+    filter(!is.na(n_amenities)) |>
+    mutate(
+      amenity_group = case_when(
+        n_amenities <= 5 ~ "0 to 5",
+        n_amenities <= 10 ~ "6 to 10",
+        n_amenities <= 15 ~ "11 to 15",
+        TRUE ~ "More than 15"
+      )
+    ) |>
+    group_by(amenity_group) |>
+    summarise(
+      listings = n(),
+      median_revenue = median(revenue, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  amenity_summary
+
+  ggplot(
+    amenity_summary,
+    aes(x = amenity_group, y = median_revenue)
+  ) +
+    geom_col(fill = "darkseagreen4") +
+    scale_y_continuous(labels = dollar_format()) +
+    labs(
+      title = "Median Expected Nightly Revenue by Number of Amenities",
+      x = "Number of amenities",
+      y = "Median expected revenue"
+    )
+
+} else {
+  cat("The n_amenities variable was not found in this dataset.")
+}
+```
+
+**What I notice:** I compare the groups to see whether listings with more amenities also tend to have higher expected revenue. This does not mean that adding amenities will automatically increase revenue. The type, quality, and cost of the amenities would also matter.
+
+## What the analysis suggests
+
+The charts above compare expected revenue with a few listing characteristics. Before making recommendations, I would look at the summary tables and charts together rather than relying on only one measure.
+
+Based on the results from this dataset, I would summarize the main points as follows:
+
+- **Location:** The borough comparison shows where median expected nightly revenue is higher or lower.
+- **Pricing:** The price and occupancy chart helps show whether higher prices are associated with different occupancy levels.
+- **Room type:** The room type comparison shows how expected revenue differs across listing types.
+- **Amenities:** The amenity comparison shows whether listings with more amenities also tend to have higher expected revenue.
+
+After rendering the report, I will replace these general descriptions with the specific boroughs, room types, and amenity groups shown in my results.
+
+## Recommendations
+
+The analysis can help Airbnb hosts think about a few business decisions:
+
+1.  **Compare similar listings before setting a price.** Hosts should consider listings in the same area and with a similar room type and guest capacity.
+2.  **Look at occupancy as well as price.** A high nightly price may not be helpful if the listing has low occupancy.
+3.  **Choose amenities carefully.** Hosts can focus on amenities that guests value instead of assuming that adding more amenities will always lead to more revenue.
+4.  **Consider the full cost of operating a listing.** Expected revenue is not the same as profit. Expenses should be included before making an investment decision.
+
+## Limitations
+
+There are a few limitations to this analysis. First, occupancy is modeled, so it may not match the actual number of nights a listing is booked. Second, revenue is calculated using nightly price and occupancy and does not include operating expenses. Third, the comparisons show patterns but do not prove that one listing characteristic causes higher revenue. Finally, listings can differ in ways that are not included in this analysis, such as property condition, exact location, season, and guest demand.
+
+## Conclusion
+
+This project looked at how location, price, room type, and amenities relate to expected nightly Airbnb revenue in New York City. The comparisons provide a starting point for understanding differences between listings. The main takeaway is that hosts should consider more than nightly price when evaluating a listing. Occupancy, location, property type, and operating costs are also important.
+
+## References
+
+Inside Airbnb. (n.d.). *New York City data*. https://insideairbnb.com/get-the-data/
+
+Hagstrom, G. (2026). *DATA 608 Fall 2026: Airbnb revenue analysis assignment and data files*. CUNY School of Professional Studies.
